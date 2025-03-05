@@ -1,9 +1,7 @@
 package GameServer
 
 import (
-	"MonophobiaServer/messages"
 	"bytes"
-	"fmt"
 	"math/rand/v2"
 	"net"
 	"os"
@@ -12,15 +10,18 @@ import (
 	"strconv"
 	"syscall"
 
+	"MonophobiaServer/messages"
+
 	log "github.com/sirupsen/logrus"
 )
 
 type GameServer struct {
-	IP          net.IP
-	Port        int
-	GameVersion string
-	Clients     []*Client
-	Lobbies     []*Lobby
+	IP               net.IP
+	Port             int
+	GameVersion      string
+	Clients          []*Client
+	Lobbies          []*Lobby
+	UDPConnectionMap map[string]*Client
 }
 
 type Client struct {
@@ -30,11 +31,25 @@ type Client struct {
 	ConnectedPlayer *Player
 }
 
+func (c *Client) RespondError(msg string, disconnect bool) {
+	respPacket := Packet{}
+	if disconnect {
+		respPacket.Header = messages.Disconnecting
+	} else {
+		respPacket.Header = messages.Rejected
+	}
+	respPacket.Flag = messages.None
+
+	respPacket.AddString(msg)
+	respPacket.Send(*c.Conn)
+}
+
 func newClient() *Client {
 	cl := &Client{}
 	cl.UDPPort = -1
 	return cl
 }
+
 func newPlayer() *Player {
 	pl := &Player{}
 	pl.ID = -1
@@ -50,6 +65,9 @@ func (s *GameServer) Start() {
 	go s.bindTCP()
 	go s.bindUDP()
 
+	s.UDPConnectionMap = make(map[string]*Client)
+
+	log.Info("Started server!")
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
 	<-sigs // Blocks until a signal is received
@@ -81,24 +99,25 @@ func (s *GameServer) bindUDP() {
 			log.WithFields(log.Fields{"error": err.Error(), "IP": addr.IP.String()}).Warn("Error receiving UDP")
 			continue
 		}
-		buf = buf[:msglen]
+		// log.Info(buf)
+		// buf = buf[:msglen]
 		if bytes.HasPrefix(buf, []byte("holepunch")) {
 			continue
 		}
-		packet := Packet{}
+		packet := &Packet{}
 		err = packet.DigestData(&buf)
 		if err != nil {
-			log.WithFields(log.Fields{"error": err.Error(), "IP": addr.IP.String()}).Warn("Error receiving UDP")
+			log.WithFields(log.Fields{"error": err.Error(), "IP": addr.IP.String()}).Trace("Error digesting udp packet data")
 			continue
 		}
-
+		//log.Info(packet.Payload)
 		if packet.Header == messages.ImHere {
 			var imHerePacket struct {
 				ID int32
 			}
 			err = packet.ReadPayload(&imHerePacket)
 			if err != nil {
-				log.WithField("error", err.Error()).Error("Failed to read imhere packet")
+				log.WithField("error", err.Error()).Debug("Failed to read imhere packet")
 				continue
 			}
 			for _, plc := range s.Clients {
@@ -107,22 +126,28 @@ func (s *GameServer) bindUDP() {
 				}
 				if (plc.ConnectedPlayer != nil) && (plc.UDPPort == -1) && (plc.ConnectedPlayer.ID == imHerePacket.ID) {
 					plc.UDPPort = addr.Port
+					s.UDPConnectionMap[strconv.FormatInt((int64)(plc.UDPPort), 10)+":"+plc.IP] = plc
 					log.WithFields(log.Fields{"PlayerID": plc.ConnectedPlayer.ID, "New_UDP_Port": plc.UDPPort}).Trace("Player initialized UDP port")
 					break
 				}
 			}
+			continue
 
 		}
+		if client, ok := s.UDPConnectionMap[strconv.FormatInt((int64)(addr.Port), 10)+":"+addr.IP.String()]; ok {
+			packet.Client = client
+			s.ParsePacket(packet)
+		} else {
+			log.WithFields(log.Fields{"IP": addr.IP.String(), "Port": addr.Port}).Trace("Got UDP data that doesnt match any client")
+		}
 	}
-
 }
 
 func (s *GameServer) bindTCP() {
-	log.WithFields(log.Fields{"server_ip": s.IP.String(), "server_port": s.Port}).Debug("Starting server")
+	log.WithFields(log.Fields{"server_ip": s.IP.String(), "server_port": s.Port}).Debug("Starting TCP server")
 	address := s.IP.String() + ":" + strconv.FormatInt((int64)(s.Port), 10)
 
 	ln, err := net.Listen("tcp4", address)
-
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -130,7 +155,7 @@ func (s *GameServer) bindTCP() {
 	defer ln.Close()
 
 	for {
-		var conn, err = ln.Accept()
+		conn, err := ln.Accept()
 		if err != nil {
 			log.Trace("Error accepting connection: " + err.Error())
 			continue
@@ -139,13 +164,14 @@ func (s *GameServer) bindTCP() {
 		go s.handleConnection(conn)
 	}
 }
+
 func (s *GameServer) handleConnection(conn net.Conn) {
 	defer conn.Close()
 	buf := make([]byte, 2048)
 	clientInitialized := false
 	LocalClient := newClient()
 	LocalClient.Conn = &conn
-	LocalClient.IP = conn.RemoteAddr().String()
+	LocalClient.IP = conn.RemoteAddr().(*net.TCPAddr).IP.String()
 	for {
 		clear(buf)
 		_, err := conn.Read(buf)
@@ -157,68 +183,79 @@ func (s *GameServer) handleConnection(conn net.Conn) {
 			break
 		}
 
-		packet := Packet{}
+		packet := &Packet{}
 		err = packet.DigestData(&buf)
 		if err != nil {
-			log.WithFields(log.Fields{"IP": conn.RemoteAddr().String()}).Trace("Failed to digest packet")
+			log.WithFields(log.Fields{"IP": conn.RemoteAddr().String(), "err": err.Error()}).Trace("Failed to digest packet")
 			continue
 		}
 		if !clientInitialized {
-			fmt.Println(packet.Header)
 			if packet.Header != messages.Hello {
-				respondError(conn, "No Hello packet", true)
+				LocalClient.RespondError("NO_HELLO", true)
 				log.WithFields(log.Fields{"IP": conn.RemoteAddr().String()}).Trace("Rejecting connection - client did not send a valid Hello packet")
 				break
 			}
 
 			var hello_packet_struct struct {
 				Name    string
+				SteamID string
 				Version string
 			}
 
 			err = packet.ReadPayload(&hello_packet_struct)
 			if err != nil {
-				respondError(conn, "Invalid Hello Packet", true)
+				LocalClient.RespondError("INVALID_HELLO", true)
 				log.WithFields(log.Fields{"IP": conn.RemoteAddr().String(), "read_error": err.Error()}).Trace("Rejecting client - client sent an invalid Hello packet")
 				break
 			}
-			//packet data is correct
+			// packet data is correct
 			if hello_packet_struct.Version != s.GameVersion {
-				respondError(conn, "Invalid game version! Yours is "+hello_packet_struct.Version+" and servers is "+s.GameVersion, true)
+				LocalClient.RespondError("INVALID_VERSION", true)
 				log.WithFields(log.Fields{"IP": conn.RemoteAddr().String(), "server_version": s.GameVersion, "client_version": hello_packet_struct.Version}).Trace("Rejecting client - invalid version")
 				break
 			}
 
-			//initializing client
+			// initializing client
 			pl := s.initializePlayer(hello_packet_struct.Name, LocalClient)
+			pl.SteamID = hello_packet_struct.SteamID
 			log.WithFields(log.Fields{"Name": pl.Name, "ID": pl.ID}).Debug("Client initialized")
 			respPacket := Packet{}
 			respPacket.Header = messages.Data
 			respPacket.Flag = messages.Response.IDAssign
-			respPacket.AddInt(pl.ID)
+			var respContent struct {
+				ID int32
+			}
+			respContent.ID = pl.ID
+			if err := respPacket.AddToPayload(&respContent); err != nil {
+				log.Error(err.Error())
+			}
 			respPacket.Send(conn)
 			LocalClient.ConnectedPlayer = pl
 			clientInitialized = true
 			continue
 		}
-
-		s.ParsePacket(packet, LocalClient)
+		packet.Client = LocalClient
+		s.ParsePacket(packet)
 	}
-
+	if LocalClient.ConnectedPlayer == nil {
+		return
+	}
 	log.WithFields(log.Fields{"name": LocalClient.ConnectedPlayer.Name, "id": LocalClient.ConnectedPlayer.ID}).Trace("Player disconnected")
-
-	for i, v := range s.Clients {
-		if v == LocalClient {
-			s.Clients = slices.Delete(s.Clients, i, i)
-		}
+	delete(s.UDPConnectionMap, strconv.FormatInt((int64)(LocalClient.ConnectedPlayer.NetworkClient.UDPPort), 10)+":"+LocalClient.IP)
+	if LocalClient.ConnectedPlayer.Lobby != nil {
+		LocalClient.ConnectedPlayer.Lobby.RemovePlayer(LocalClient.ConnectedPlayer)
 	}
 
+	s.Clients = slices.DeleteFunc(s.Clients, func(n *Client) bool {
+		return n == LocalClient
+	})
 }
 
 func (s *GameServer) initializePlayer(name string, client *Client) *Player {
-	var NewPlayer = newPlayer()
+	NewPlayer := newPlayer()
 	NewPlayer.Name = name
 	NewPlayer.IP = client.IP
+	NewPlayer.NetworkClient = client
 	client.ConnectedPlayer = NewPlayer
 	idValid := true
 	for {
@@ -237,17 +274,4 @@ func (s *GameServer) initializePlayer(name string, client *Client) *Player {
 	}
 	s.Clients = append(s.Clients, client)
 	return NewPlayer
-}
-
-func respondError(conn net.Conn, msg string, disconnect bool) {
-	respPacket := Packet{}
-	if disconnect {
-		respPacket.Header = messages.Disconnecting
-	} else {
-		respPacket.Header = messages.Rejected
-	}
-	respPacket.Flag = messages.None
-
-	respPacket.AddString(msg)
-	respPacket.Send(conn)
 }

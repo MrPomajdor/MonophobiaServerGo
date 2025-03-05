@@ -83,7 +83,7 @@ type ResponseStruct struct {
 	ClosingCon             Flag
 	LobbyListChanged       Flag
 	LobbyClosing           Flag
-	TransformData          Flag
+	PlayerTransforms       Flag
 	LobbyInfo              Flag
 	WorldState             Flag
 	ItemIntInf             Flag
@@ -110,7 +110,7 @@ var Response = ResponseStruct{
 	ClosingCon:             0xF0,
 	LobbyListChanged:       0x0A,
 	LobbyClosing:           0xF1,
-	TransformData:          0xB0,
+	PlayerTransforms:       0xB0,
 	LobbyInfo:              0x09,
 	WorldState:             0xC2,
 	ItemIntInf:             0xC5,
