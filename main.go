@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"MonophobiaServer/GameServer"
+	"MonophobiaServer/internal/server"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -36,10 +36,11 @@ func main() {
 		log.SetLevel(lv)
 	}
 
-	var server GameServer.GameServer = GameServer.GameServer{} //{IP: FlagIP, Port: int64(FlagPort)}
+	var server server.GameServer = server.GameServer{} //{IP: FlagIP, Port: int64(FlagPort)}
 	server.SetAddress(FlagIP, FlagPort)
 	server.GameVersion = "0.1.1"
 	log.WithFields(log.Fields{"IP": server.IP.String(), "Port": FlagPort}).Info("Staring server...")
+
 	server.Start()
 
 }

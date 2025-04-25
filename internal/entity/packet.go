@@ -1,7 +1,7 @@
-package GameServer
+package entity
 
 import (
-	"MonophobiaServer/messages"
+	"MonophobiaServer/internal/messages"
 	"bytes"
 	"encoding/binary"
 	"fmt"
@@ -13,8 +13,25 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+type Packet struct {
+	Client         *Client
+	Network        Network
+	Header         messages.Header
+	Flag           messages.Flag
+	FullMsgLen     int32
+	Payload        []byte
+	payloadPointer int32
+}
+
 var (
 	Endianess = binary.LittleEndian
+)
+
+type Network int
+
+const (
+	NET_TCP Network = 0
+	NET_UDP Network = 1
 )
 
 func (packet *Packet) assembleMessage() ([]byte, error) {
@@ -47,8 +64,8 @@ func (packet *Packet) DigestData(data *[]byte) error {
 		return fmt.Errorf("failed reading packet message length %w", err)
 	}
 
-	if packet.FullMsgLen > (int32)(len(*data)) {
-		return fmt.Errorf("data corrupted: Message len too long : %d should be %d", packet.FullMsgLen, (int32)(len(*data)))
+	if packet.FullMsgLen < 7 || packet.FullMsgLen > (int32)(len(*data)) {
+		return fmt.Errorf("data corrupted: invalid payload : %d while data slice len is %d", packet.FullMsgLen, (int32)(len(*data)))
 	}
 	packet.Payload = (*data)[7:packet.FullMsgLen]
 	packet.payloadPointer = 0
